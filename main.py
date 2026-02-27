@@ -5,6 +5,8 @@ import sys
 from io import StringIO
 import traceback
 import os
+import json
+import re
 
 import google.generativeai as genai
 
@@ -22,6 +24,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -------------------------------
+# ROOT ENDPOINT (VERY IMPORTANT)
+# -------------------------------
+@app.get("/")
+def home():
+    return {"message": "API is running"}
 
 # -------------------------------
 # Request Model
@@ -55,28 +64,30 @@ def analyze_error_with_ai(code: str, tb: str):
     genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
     prompt = f"""
-Find the line number where the error occurred.
+Analyze the Python code and traceback.
+
+Return ONLY JSON in this format:
+{{"error_lines": [line_numbers]}}
 
 CODE:
 {code}
 
 TRACEBACK:
 {tb}
-
-Return JSON like:
-{{"error_lines": [line_numbers]}}
 """
 
     model = genai.GenerativeModel("gemini-1.5-flash")
 
     response = model.generate_content(prompt)
 
-    import json
     try:
+        # Try proper JSON parsing
         data = json.loads(response.text)
         return data.get("error_lines", [])
     except:
-        return []
+        # Fallback: extract numbers manually
+        numbers = re.findall(r'\d+', response.text)
+        return [int(n) for n in numbers]
 
 # -------------------------------
 # API ENDPOINT
@@ -85,14 +96,14 @@ Return JSON like:
 def code_interpreter(req: CodeRequest):
     result = execute_python_code(req.code)
 
-    # ✅ No error
+    # ✅ If no error
     if result["success"]:
         return {
             "error": [],
             "result": result["output"]
         }
 
-    # ❌ Error → call AI
+    # ❌ If error → call AI
     lines = analyze_error_with_ai(req.code, result["output"])
 
     return {
