@@ -50,43 +50,42 @@ def execute_python_code(code: str) -> dict:
 
 # Step 2: AI Error Detective (fixed version)
 def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
-    """Use Gemini AI to find exact error line numbers."""
-    
-    # Configure Gemini
-    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
-    
-    prompt = f"""
-    Analyze this Python code and its error traceback.
-    Identify ONLY the line number(s) where the error occurred.
-    
-    CODE:
-    {code}
-    
-    TRACEBACK:
-    {traceback_str}
-    
-    Respond with ONLY this JSON format:
-    {{"error_lines": [3]}}
-    """
-    
-    try:
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "response_mime_type": "application/json",
-            }
-        )
-        
-        # Parse the JSON response
-        import json
-        result = json.loads(response.text.strip())
-        return result.get("error_lines", [])
-        
-    except Exception:
-        # Fallback: return empty list if AI fails
-        return []
+    import re
+    import json
 
+    # 🔹 Step 1: Try AI
+    try:
+        genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+
+        prompt = f"""
+        Find the exact line number where the error occurred.
+
+        CODE:
+        {code}
+
+        TRACEBACK:
+        {traceback_str}
+
+        Return ONLY JSON:
+        {{"error_lines": [line_numbers]}}
+        """
+
+        response = model.generate_content(prompt)
+        result = json.loads(response.text.strip())
+
+        if "error_lines" in result and result["error_lines"]:
+            return result["error_lines"]
+
+    except:
+        pass  # fallback below
+
+    # 🔹 Step 2: FALLBACK (CRITICAL FIX ✅)
+    match = re.search(r'line (\d+)', traceback_str)
+    if match:
+        return [int(match.group(1))]
+
+    return []
 # Step 3: The Main API Endpoint
 @app.post("/code-interpreter", response_model=InterpreterResponse)
 async def code_interpreter(request: CodeRequest):
