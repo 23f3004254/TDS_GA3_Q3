@@ -1,22 +1,18 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import sys
 from io import StringIO
 import traceback
 import os
-import json
-import re
-
 import google.generativeai as genai
+from pydantic import BaseModel as PydanticBaseModel
 
+# Initialize FastAPI app
 app = FastAPI()
 
-# -------------------------------
-# Enable CORS (IMPORTANT)
-# -------------------------------
-from fastapi.middleware.cors import CORSMiddleware
-
+# Enable CORS (required for testing)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,88 +21,100 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------------
-# ROOT ENDPOINT (VERY IMPORTANT)
-# -------------------------------
-@app.get("/")
-def home():
-    return {"message": "API is running"}
-
-# -------------------------------
-# Request Model
-# -------------------------------
+# Pydantic models
 class CodeRequest(BaseModel):
     code: str
 
-# -------------------------------
-# Execute Code (TOOL FUNCTION)
-# -------------------------------
-def execute_python_code(code: str):
+class ErrorAnalysis(PydanticBaseModel):
+    error_lines: List[int]
+
+class InterpreterResponse(BaseModel):
+    error: List[int]
+    result: str
+
+# Step 1: The Code Runner Tool (exactly as provided)
+def execute_python_code(code: str) -> dict:
+    """Execute Python code and return exact output."""
     old_stdout = sys.stdout
     sys.stdout = StringIO()
-
+    
     try:
         exec(code)
         output = sys.stdout.getvalue()
         return {"success": True, "output": output}
-
     except Exception:
         output = traceback.format_exc()
         return {"success": False, "output": output}
-
     finally:
         sys.stdout = old_stdout
 
-# -------------------------------
-# AI Error Analysis
-# -------------------------------
-def analyze_error_with_ai(code: str, tb: str):
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
+# Step 2: AI Error Detective (fixed version)
+def analyze_error_with_ai(code: str, traceback_str: str) -> List[int]:
+    """Use Gemini AI to find exact error line numbers."""
+    
+    # Configure Gemini
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    
     prompt = f"""
-Analyze the Python code and traceback.
-
-Return ONLY JSON in this format:
-{{"error_lines": [line_numbers]}}
-
-CODE:
-{code}
-
-TRACEBACK:
-{tb}
-"""
-
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
-    response = model.generate_content(prompt)
-
+    Analyze this Python code and its error traceback.
+    Identify ONLY the line number(s) where the error occurred.
+    
+    CODE:
+    {code}
+    
+    TRACEBACK:
+    {traceback_str}
+    
+    Respond with ONLY this JSON format:
+    {{"error_lines": [3]}}
+    """
+    
     try:
-        # Try proper JSON parsing
-        data = json.loads(response.text)
-        return data.get("error_lines", [])
-    except:
-        # Fallback: extract numbers manually
-        numbers = re.findall(r'\d+', response.text)
-        return [int(n) for n in numbers]
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "response_mime_type": "application/json",
+            }
+        )
+        
+        # Parse the JSON response
+        import json
+        result = json.loads(response.text.strip())
+        return result.get("error_lines", [])
+        
+    except Exception:
+        # Fallback: return empty list if AI fails
+        return []
 
-# -------------------------------
-# API ENDPOINT
-# -------------------------------
-@app.post("/code-interpreter")
-def code_interpreter(req: CodeRequest):
-    result = execute_python_code(req.code)
+# Step 3: The Main API Endpoint
+@app.post("/code-interpreter", response_model=InterpreterResponse)
+async def code_interpreter(request: CodeRequest):
+    """Main endpoint: run code + AI error analysis."""
+    
+    # 1. Run the code
+    execution_result = execute_python_code(request.code)
+    
+    # 2. Check if successful
+    if execution_result["success"]:
+        return InterpreterResponse(
+            error=[],
+            result=execution_result["output"]
+        )
+    
+    # 3. Error occurred → call AI detective
+    error_lines = analyze_error_with_ai(
+        code=request.code,
+        traceback_str=execution_result["output"]
+    )
+    
+    return InterpreterResponse(
+        error=error_lines,
+        result=execution_result["output"]
+    )
 
-    # ✅ If no error
-    if result["success"]:
-        return {
-            "error": [],
-            "result": result["output"]
-        }
-
-    # ❌ If error → call AI
-    lines = analyze_error_with_ai(req.code, result["output"])
-
-    return {
-        "error": lines,
-        "result": result["output"]
-    }
+# Health check
+@app.get("/")
+def root():
+    return {"message": "Code Interpreter API is running!"}
+ 
